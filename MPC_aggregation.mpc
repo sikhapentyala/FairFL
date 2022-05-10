@@ -2,74 +2,89 @@
 # Project : Privacy-preserving aggregation of statistics for fairness
 #           pre-processing techniques
 # Contact : Sikha Pentyala (sikha.pentyala@mila.quebec; sikha@uw.edu)
-################################################################################## 
-
+##################################################################################
 ##################################################################################
 # Description : The section aggregates various statistics from various users
 #               specifically cross-device federated scenario - for binary
-#               class labels and with single binary sensitive attribute. 
+#               class labels and with single binary sensitive attribute.
 #               Aggregations such as number of samples with positive label
 # TODO:   Change it to a method
-##################################################################################               
-
+##################################################################################
+from Compiler import mpc_math, util
+from Compiler.types import *
+import math
 # Declare aggregate variables - to compute
 cs0y0 = 0  # Samples with unpriviliged and - label
 cs0y1 = 0  # Samples with unpriviliged and + label
 cs1y0 = 0  # Samples with priviliged and - label
 cs1y1 = 0  # Samples with priviliged and + label
-#-------------------- 
+#--------------------
 tot = 0    # Total number of samples = cy0 + cy1
 cy0 = 0    # Total - samples = cs1y0 + cs0y0
 cy1 = 0    # Total + samples = cs1y1 + cs0y1
 cs0 = 0    # Total unpriviliged samples =  cs0y0 + cs0y1
 cs1 = 0    # Total priviliges samples   =  cs1y0 + cs1y1
-
-# Get public constants 
+# Get public constants
 # M = int(program.args[1])
 # M = public_input()
-M = 3  # Number of users from whom data is to be aggregated
-
+M = 109  # Number of users from whom data is to be aggregated
+eps_ = 1
 # Get secret shares of data from all users
 # User will share - [sensitive attribute, -s, +s]
 data = sint.Matrix(M,3)
+data.input_from(0)
+'''
 for client in range(M):
         X = Array(3,sint)
         X.input_from(client)
         data[client].assign_vector(X.get_vector())
-
-
+'''
+def compute_lap_noise(sens=1,eps=eps_/2):
+        myscale = sens/eps
+        U = sfix.get_random(-0.5,0.5)
+        absU = mpc_math.abs_fx(U)
+        sgnU = U.__truediv__(absU)
+        ln_value = 1 - 2 * absU
+        noise = -1 * myscale * sgnU * mpc_math.log_fx(ln_value, math.e)
+        return noise
 # Calculate csiyi - 4 variables
 for client in range(M):
         is_priv = data[client][0] # s = 1
         num_of_neg = data[client][1]
         num_of_pos = data[client][2]
-
         #4 muls, 4 adds, 2 sub
-
         #cs1y0 = cs1y0 + is_priv * num_of_neg
         #cs1y1 = cs1y1 + is_priv * num_of_pos
         #cs0y0 = cs0y0 + (1-is_priv) * num_of_neg
         #cs0y1 = cs0y1 + (1-is_priv) * num_of_pos
-
         #2 muls, 4 adds, 2 sub
-
         priv_neg = is_priv * num_of_neg
         priv_pos = is_priv * num_of_pos
         cs1y0 = cs1y0 + priv_neg
         cs1y1 = cs1y1 + priv_pos
         cs0y0 = cs0y0 + num_of_neg - priv_neg
         cs0y1 = cs0y1 + num_of_pos - priv_pos
-
+cs1y0 = cs1y0 + compute_lap_noise(1,eps_/2)
+cs0y0 = cs0y0 + compute_lap_noise(1,eps_/2)
+cs0y1 = cs0y1 + compute_lap_noise(1,eps_/2)
+cs1y1 = cs1y1 + compute_lap_noise(1,eps_/2)
 cs0 = cs0y0 + cs0y1
 cs1 = cs1y0 + cs1y1
 cy0 = cs0y0 + cs1y0
 cy1 = cs0y1 + cs1y1
 tot = cy0 + cy1
-
 # Reveal to test
-print_ln("%s,%s", tot.reveal(),cs0y0.reveal())
-##################################################################################
-# Description : The section recieves the formula to be computed and adds noise to
-#               only to be revealed statistics. The below section is noise genera
-#               tion.               
-##################################################################################   
+#print_ln("%s,%s,%s,%s,%s", tot.reveal(),cs1y0.reveal(),cs1y0.reveal(),cs1y1.reveal(),cs0y1.reveal())
+# Compute weights
+ws1y0 = 1/cs1y0
+ws0y0 = 1/cs0y0
+ws0y1 = 1/cs0y1
+ws1y1 = 1/cs1y1
+# Normalize weights
+sum_w = cs0y0 * ws0y0 +  cs0y1 * ws0y1 + cs1y0 * ws1y0 + cs1y1 * ws1y1
+norm = (tot / sum_w)
+ws1y0 = ws1y0 * norm
+ws1y1 = ws1y1 * norm
+ws0y0 = ws0y0 * norm
+ws0y1 = ws0y1 * norm
+print_ln("%s,%s,%s,%s", ws1y0.reveal(),ws1y1.reveal(), ws0y0.reveal(), ws0y1.reveal())
