@@ -1,0 +1,182 @@
+from Compiler import mpc_math, util
+from Compiler.types import *
+import math
+
+
+# We cannot know the number of samples , can we?
+# Since we use fedAvg, I assume that this can be a public value
+# But we do not make this public in preprocessing
+# tot, cs0, cs1 are secret-shared, cannot use secret shared to declare variables.
+N = 6
+
+# Matrix might not allow to have probs as sifx and other two as sint
+# Two ways convert everything into sfix or take every input separately
+data = sfix.Matrix(N,3) # [s, label, score]
+
+
+sensitive_values = sint.Array(N)
+labels = sint.Array(N)
+probs = sfix.Array(N)
+
+sensitive_values.input_from(0)
+labels.input_from(0)
+probs.input_from(0)
+
+
+### STEP 0 : Code for Laplacian noise
+eps_ = 1
+
+def compute_lap_noise(sens=1,eps=eps_/2):
+        myscale = sens/eps
+        U = sfix.get_random(-0.5,0.5)
+        absU = mpc_math.abs_fx(U)
+        sgnU = U.__truediv__(absU)
+        ln_value = 1 - 2 * absU
+        noise = -1 * myscale * sgnU * mpc_math.log_fx(ln_value, math.e)
+        return noise
+
+
+### STEP 1
+###### Find threshold vectors for S=0 and S=1
+
+def get_thresholds(probs):
+    probs.sort()
+    probset = sfix.Array(len(probs))
+
+    # This requires sort two times
+    j = 0
+    prev = -1
+    const = -1 
+    # (because we will reverse it negative value requirs more time - 
+    # but pos values will be at begn, we can use break loop if at end)
+    # Or can we use >1 and  continue
+    
+    for i in range(len(probs)):
+            rpt = (prev == probs[i])
+            #val = rpt * (-1) + (1-rpt)*probs[i]
+            prob = probs[i]
+            val = prob + rpt*(const-prob)
+            probset[j] = val
+            prev = probs[i]
+            j = j + 1
+
+    probset.sort()
+
+
+    # Take reverse
+    revprobs = sfix.Array(len(probs))
+    j = len(probs) - 1
+    for i in range(len(probs)):
+            revprobs[j] = probset[i]
+            j = j-1
+
+    # Get thresholds
+    thresholds = sfix.Array(len(probs))
+    for i in range(len(probs)):
+            if i == len(probs)-1:
+               t = 0
+            else:
+               t = 0.5 *(revprobs[i] + revprobs[i+1])
+            neg = (t < 0)
+            t = t + neg * (0-t)
+            thresholds[i] = t
+
+    return thresholds
+
+###TODO : get separate probs
+# No need it works well with single thresholds in clear
+
+#thresholds_m = get_thresholds(probs_f)
+#thresholds_f = get_thresholds(probs_m)
+thresholds = get_thresholds(probs)
+
+### STEP 2
+###### Get ROCs
+
+ROC_priv = sfix.Matrix(len(thresholds),3)
+ROC_unpriv = sfix.Matrix(len(thresholds),3)
+
+## For each thresholds
+for t in range(len(thresholds)):
+    curr_threshold = thresholds[t]
+
+
+    
+    ## get predictions
+    preds = sint.Array(N)
+    @for_range_opt(N)
+    def _(i):
+            pred = (probs[i] >= thresholds[1])
+            preds[i] = pred
+    
+    # tpr, fpr
+    # Without knowing the number of P and N for each group (cannot use TP/P)
+    # User TPR = (TP/TP+FN), FPR = (FP/TN+FP)
+
+    # TP, FP, TN, FN
+    cf_priv = sfix.Array(4)
+    cf_unpriv = sfix.Array(4)
+
+    @for_range(4)
+    def _(i):
+            cf_priv[i] = sfix(0)
+            cf_unpriv[i] = sfix(0)
+
+    @for_range_opt(N)
+    def _(i):
+            label = labels[i]
+            pred = preds[i]
+            is_priv = sensitive_values[i]
+
+            true_label = (label == 1)
+            true_pred = (pred == 1)
+
+            tp = true_label * true_pred
+            true_label_priv = is_priv * true_label
+            true_pred_priv = is_priv * true_pred
+            tp_priv = is_priv * tp
+
+            # TP
+            cf_priv[0] = cf_priv[0] + tp_priv 
+            cf_unpriv[0] = cf_unpriv[0] + (tp - tp_priv) 
+
+            # FP
+            cf_priv[1] = cf_priv[1] + (true_pred_priv -  tp_priv)
+            cf_unpriv[1] = cf_unpriv[1] + (true_pred - true_pred_priv - tp + tp_priv)    #() 
+
+            # TN
+            cf_priv[2] = cf_priv[1] + (is_priv - true_pred_priv -true_pred_priv+ tp_priv)
+            cf_unpriv[2] = cf_unpriv[1] + (1 - true_label - true_pred + tp - is_priv + true_label_priv+ true_pred_priv - tp_priv)                 
+
+
+            # FN
+            cf_priv[3] = cf_priv[1] + (true_label_priv -  tp_priv)
+            cf_unpriv[3] = cf_unpriv[1] + (true_label - true_pred_priv - tp + tp_priv)
+
+
+    @for_range(4)
+    def _(i):
+            cf_priv[i] = cf_priv[i] + compute_lap_noise(1,eps_/2)
+            cf_unpriv[i] = cf_unpriv[i] + compute_lap_noise(1,eps_/2)
+    
+
+    TPR_priv = cf_priv[0] / (cf_priv[0] + cf_priv[3])
+    FPR_priv = cf_priv[1] / (cf_priv[1] + cf_priv[2])
+
+    TPR_unpriv = cf_unpriv[0] / (cf_unpriv[0] + cf_unpriv[3])
+    FPR_unpriv = cf_unpriv[1] / (cf_unpriv[1] + cf_unpriv[2])
+
+
+    temp = sfix.Array(3)
+    temp[2] = curr_threshold
+    
+    temp[0] = FPR_priv
+    temp[1] = TPR_priv
+    ROC_priv[t] = temp
+
+    temp[0] = FPR_unpriv
+    temp[1] = TPR_unpriv
+    ROC_unpriv[t] = temp
+
+
+
